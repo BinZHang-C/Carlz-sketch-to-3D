@@ -10,12 +10,263 @@ interface EnhanceParams {
   smoothing: number;
   detail: number;
   light: number;
+  depth: number;
 }
 
 interface ParsedDataUrl {
   mimeType: string;
   data: string;
 }
+
+interface HistoryItem {
+  id: number;
+  image: string;
+  mode: RenderMode;
+}
+
+interface StyleFingerprint {
+  avgHex: string;
+  hue: number;
+  saturation: number;
+  lightness: number;
+  contrast: number;
+  warmRatio: number;
+  highlightRatio: number;
+  shadowRatio: number;
+  lightDirectionDeg: number;
+}
+
+const buildPlanProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerprint | null): string => {
+  const styleCapture = Math.min(99, Math.max(75, Math.round(blendWeight * 0.92 + 7)));
+  const styleTelemetry = fingerprint
+    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%, highlight ratio: ${fingerprint.highlightRatio}%, shadow ratio: ${fingerprint.shadowRatio}%, light direction: ${fingerprint.lightDirectionDeg}°.`
+    : 'Reference telemetry unavailable: still prioritize strict colorimetry lock to Image 2.';
+
+  return [
+    '[PROTOCOL: PLAN_STYLE_LOCK_V3]',
+    'Task: Convert Image 1 architectural lineart/floor plan into a 3D rendered visualization while preserving exact geometry from Image 1.',
+    'Instruction priority (strict order):',
+    '1) Pixel geometry lock from Image 1. 2) Colorimetry lock from Image 2. 3) Detail enhancement.',
+    'Hard geometry constraints:',
+    '- Pixel-level geometry lock: keep every wall edge, opening boundary, corner position, and spatial proportion aligned to Image 1 without translation, warping, redesign, or camera-angle drift.',
+    '- Keep architectural contour readability and line hierarchy intact. No added structures, no removed structures, no layout hallucination.',
+    'Hard style constraints from Image 2 only:',
+    '- Use Image 2 as the sole style authority. Never borrow style cues from previous outputs, history thumbnails, or latent memory.',
+    '- Match dominant palette family, hue distribution, color gamut boundary, tonal contrast curve, shadow softness, light direction, saturation envelope, and warm/cool balance.',
+    '- Keep atmosphere density and brightness interval consistent with Image 2. Avoid random color temperature drift.',
+    styleTelemetry,
+    `- Style adherence target: ${styleCapture}% (derived from blend weight ${blendWeight}%).`,
+    'Stability requirement for repeated runs with identical inputs:',
+    '- Low-variance rendering: outputs must remain within a tight tolerance around Image 2 hue/gamut/saturation/light-direction signature.',
+    '- Error budget target: keep hue/saturation/lightness/contrast drift within ±1% versus Image 2 telemetry whenever feasible.',
+    '- If uncertain, prefer conservative reproduction of Image 2 colorimetry; do not invent new tones or cinematic grading.',
+    'Rendering guidance:',
+    '- Maintain clean architectural visualization quality with stable surfaces and minimal texture noise artifacts.',
+  ].join(' ');
+};
+
+const buildSpatialProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerprint | null): string => {
+  const styleCapture = Math.min(98, Math.max(68, Math.round(blendWeight * 0.88 + 10)));
+  const spatialTelemetry = fingerprint
+    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%, highlight ratio: ${fingerprint.highlightRatio}%, shadow ratio: ${fingerprint.shadowRatio}%, light direction: ${fingerprint.lightDirectionDeg}°.`
+    : 'Reference telemetry unavailable: still follow strict lineart lock + material screenshot extraction from Image 2.';
+
+  return [
+    '[PROTOCOL: SPATIAL_LOCK_V2]',
+    'Task: Transfer Image 2 material language into Image 1 architecture while keeping Image 1 geometry structure pixel-locked.',
+    'Hard constraints:',
+    '- Pixel-level lineart lock: preserve every boundary, edge, opening, corner, and proportion from Image 1 without deformation or topology edits.',
+    '- Material screenshot recognition: detect materials in Image 2 (surface roughness, reflectance, texture scale, pattern frequency) and map them faithfully to corresponding architectural regions.',
+    '- Keep camera framing and global perspective stable and consistent with Image 1 structural layout.',
+    spatialTelemetry,
+    `- Style adherence target: ${styleCapture}% based on blend weight ${blendWeight}%.`,
+    '- Consistency tolerance target: keep hue/saturation/lightness/contrast drift within ±1% versus Image 2 telemetry whenever feasible.',
+  ].join(' ');
+};
+
+
+const buildEnhanceProtocolPrompt = (params: EnhanceParams): string => {
+  const toEffectiveValue = (value: number) => Math.round(50 + (value - 50) * 0.2);
+  const textureControl = toEffectiveValue(params.texture);
+  const detailControl = toEffectiveValue(params.detail);
+  const lightControl = toEffectiveValue(params.light);
+  const depthControl = toEffectiveValue(params.depth);
+
+  return [
+    '[PROTOCOL: HD_REMASTER_8K_CINEMATIC]',
+    'Task: Upgrade Image 1 to ultra-clear 8K-grade architectural remaster while preserving original spatial content and structural details exactly.',
+    'Hard constraints:',
+    '- Do not alter layout, topology, camera framing, object positions, or architectural proportions.',
+    '- Remove blur and grain noise, but avoid plastic over-smoothing and avoid artificial sharpening halos.',
+    '- Keep all edges and micro-details faithful to the source, no hallucinated objects or texture drift.',
+    'Rendering quality goals:',
+    '- Deliver cinematic photoreal rendering with physically plausible material response.',
+    '- Improve texture readability, reflection behavior, highlight roll-off, and shadow transitions in a realistic non-exaggerated way.',
+    '- Enhance depth-of-field perception for cinematic layering while keeping key architectural planes readable.',
+    'User slider governance:',
+    '- Slider control weight = 20% for texture/detail/light/depth; preserve baseline realism as 80%.',
+    `- Effective controls -> texture: ${textureControl}%, detail: ${detailControl}%, light: ${lightControl}%, depth: ${depthControl}%.`,
+  ].join(' ');
+};
+
+const defaultEnhanceParams: EnhanceParams = {
+  texture: 99,
+  smoothing: 10,
+  detail: 90,
+  light: 70,
+  depth: 45,
+};
+
+const parseAspectRatioToCss = (ratio: string): string => {
+  if (ratio === '16:9') return '16 / 9';
+  if (ratio === '9:16') return '9 / 16';
+  if (ratio === '4:3') return '4 / 3';
+  if (ratio === '3:4') return '3 / 4';
+  return '1 / 1';
+};
+
+
+const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+
+const rgbToHsl = (r: number, g: number, b: number) => {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const delta = max - min;
+
+  let h = 0;
+  if (delta !== 0) {
+    if (max === rn) h = ((gn - bn) / delta) % 6;
+    else if (max === gn) h = (bn - rn) / delta + 2;
+    else h = (rn - gn) / delta + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+
+  const l = (max + min) / 2;
+  const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
+
+  return { h, s: clamp01(s), l: clamp01(l) };
+};
+
+const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const maxSide = 192;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) throw new Error('无法分析参考图风格，请重试。');
+
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        let total = 0;
+        let sumR = 0;
+        let sumG = 0;
+        let sumB = 0;
+        let sumSat = 0;
+        let sumLight = 0;
+        let sumHueX = 0;
+        let sumHueY = 0;
+        let warmCount = 0;
+        let minLum = 1;
+        let maxLum = 0;
+        let highlightCount = 0;
+        let shadowCount = 0;
+        let brightWeightSum = 0;
+        let darkWeightSum = 0;
+        let brightX = 0;
+        let brightY = 0;
+        let darkX = 0;
+        let darkY = 0;
+
+        for (let i = 0; i < data.length; i += 4) {
+          const alpha = data[i + 3] / 255;
+          if (alpha < 0.05) continue;
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const { h, s, l } = rgbToHsl(r, g, b);
+          const hRad = (h * Math.PI) / 180;
+          const pixelIndex = i / 4;
+          const x = pixelIndex % canvas.width;
+          const y = Math.floor(pixelIndex / canvas.width);
+          const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+
+          total += 1;
+          sumR += r;
+          sumG += g;
+          sumB += b;
+          sumSat += s;
+          sumLight += l;
+          sumHueX += Math.cos(hRad);
+          sumHueY += Math.sin(hRad);
+          if (r > b) warmCount += 1;
+          minLum = Math.min(minLum, l);
+          maxLum = Math.max(maxLum, l);
+
+          if (luminance >= 0.68) {
+            highlightCount += 1;
+            brightWeightSum += luminance;
+            brightX += x * luminance;
+            brightY += y * luminance;
+          }
+          if (luminance <= 0.32) {
+            shadowCount += 1;
+            const darkWeight = 1 - luminance;
+            darkWeightSum += darkWeight;
+            darkX += x * darkWeight;
+            darkY += y * darkWeight;
+          }
+        }
+
+        if (!total) throw new Error('参考图像像素无效，请更换图片。');
+
+        const avgR = Math.round(sumR / total);
+        const avgG = Math.round(sumG / total);
+        const avgB = Math.round(sumB / total);
+        const avgHue = (Math.atan2(sumHueY / total, sumHueX / total) * 180) / Math.PI;
+        const normalizedHue = Math.round(avgHue < 0 ? avgHue + 360 : avgHue);
+        const avgSat = Math.round((sumSat / total) * 100);
+        const avgLight = Math.round((sumLight / total) * 100);
+        const contrast = Math.round((maxLum - minLum) * 100);
+        const warmRatio = Math.round((warmCount / total) * 100);
+        const highlightRatio = Math.round((highlightCount / total) * 100);
+        const shadowRatio = Math.round((shadowCount / total) * 100);
+        const brightCenterX = brightWeightSum > 0 ? brightX / brightWeightSum : canvas.width / 2;
+        const brightCenterY = brightWeightSum > 0 ? brightY / brightWeightSum : canvas.height / 2;
+        const darkCenterX = darkWeightSum > 0 ? darkX / darkWeightSum : canvas.width / 2;
+        const darkCenterY = darkWeightSum > 0 ? darkY / darkWeightSum : canvas.height / 2;
+        const directionRad = Math.atan2(brightCenterY - darkCenterY, brightCenterX - darkCenterX);
+        const lightDirectionDeg = Math.round((((directionRad * 180) / Math.PI) + 360) % 360);
+        const avgHex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
+
+        resolve({
+          avgHex: avgHex.toUpperCase(),
+          hue: normalizedHue,
+          saturation: avgSat,
+          lightness: avgLight,
+          contrast,
+          warmRatio,
+          highlightRatio,
+          shadowRatio,
+          lightDirectionDeg,
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('参考图风格分析失败。'));
+      }
+    };
+    img.onerror = () => reject(new Error('参考图加载失败，请重试。'));
+    img.src = dataUrl;
+  });
 
 const MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024;
 const API_KEY_STORAGE_KEY = 'ARCHI_LOGIC_KEY';
@@ -63,23 +314,25 @@ const App: React.FC = () => {
   const [refImage, setRefImage] = useState<string | null>(null);
   const [lineartImage, setLineartImage] = useState<string | null>(null);
   const [resultImage, setResultImage] = useState<string | null>(null);
+  const [historyItems, setHistoryItems] = useState<Record<RenderMode, HistoryItem[]>>({
+    plan: [],
+    spatial: [],
+    enhance: [],
+  });
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [selectedSize, setSelectedSize] = useState<ImageSize>('1K输出');
   const [blendWeight, setBlendWeight] = useState<number>(100);
   const [lineartAspectRatio, setLineartAspectRatio] = useState<string>('1:1');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [refStyleFingerprint, setRefStyleFingerprint] = useState<StyleFingerprint | null>(null);
 
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [tempApiKey, setTempApiKey] = useState('');
   const [manualApiKey, setManualApiKey] = useState(() => getStoredApiKey());
   const [isEnvKeyActive, setIsEnvKeyActive] = useState(false);
 
-  const [enhanceParams, setEnhanceParams] = useState<EnhanceParams>({
-    texture: 99,
-    smoothing: 10,
-    detail: 90,
-    light: 70,
-  });
+  const [enhanceParams, setEnhanceParams] = useState<EnhanceParams>(defaultEnhanceParams);
 
   const isEnhance = renderMode === 'enhance';
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -110,9 +363,15 @@ const App: React.FC = () => {
 
   const handleModeSwitch = (mode: RenderMode) => {
     setRenderMode(mode);
+    setRefImage(null);
+    setLineartImage(null);
     setResultImage(null);
+    setBlendWeight(100);
+    setLineartAspectRatio('1:1');
+    setEnhanceParams(defaultEnhanceParams);
     setStatus('idle');
     setErrorMessage(null);
+    setRefStyleFingerprint(null);
   };
 
   const getImageAspectRatio = (base64: string): Promise<string> => {
@@ -167,6 +426,8 @@ const App: React.FC = () => {
         setErrorMessage(null);
         if (type === 'ref') {
           setRefImage(data);
+          const fingerprint = await analyzeReferenceStyle(data);
+          setRefStyleFingerprint(fingerprint);
         } else {
           setLineartImage(data);
           const ratio = await getImageAspectRatio(data);
@@ -212,14 +473,21 @@ const App: React.FC = () => {
 
       if (isEnhance) {
         parts.push({
-          text: `[PROTOCOL: HD_REMASTER] texture: ${enhanceParams.texture}%, detail: ${enhanceParams.detail}%, light: ${enhanceParams.light}%. Enhance quality while preserving architecture lines.`,
+          text: buildEnhanceProtocolPrompt(enhanceParams),
         });
       } else {
         const refPart = parseDataUrl(refImage!);
         parts.push({ inlineData: { data: refPart.data, mimeType: refPart.mimeType } });
-        parts.push({
-          text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
-        });
+
+        if (renderMode === 'plan') {
+          parts.push({
+            text: `${buildPlanProtocolPrompt(blendWeight, refStyleFingerprint)} Interpret the above priorities literally and strictly for deterministic style consistency.`,
+          });
+        } else {
+          parts.push({
+            text: buildSpatialProtocolPrompt(blendWeight, refStyleFingerprint),
+          });
+        }
       }
 
       const response: GenerateContentResponse = await ai.models.generateContent({
@@ -238,7 +506,12 @@ const App: React.FC = () => {
         throw new Error('模型未返回有效图像，请调整参数后重试。');
       }
 
-      setResultImage(`data:${imgPart.inlineData.mimeType || 'image/png'};base64,${imgPart.inlineData.data}`);
+      const newResult = `data:${imgPart.inlineData.mimeType || 'image/png'};base64,${imgPart.inlineData.data}`;
+      setResultImage(newResult);
+      setHistoryItems((prev) => ({
+        ...prev,
+        [renderMode]: [{ id: Date.now(), image: newResult, mode: renderMode }, ...prev[renderMode]].slice(0, 8),
+      }));
     } catch (err: unknown) {
       console.error(err);
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -339,6 +612,20 @@ const App: React.FC = () => {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {previewImage && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/85 backdrop-blur-sm p-8">
+          <button
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-8 right-8 text-white/80 hover:text-white"
+          >
+            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <img src={previewImage} className="max-w-[92vw] max-h-[90vh] object-contain rounded-3xl shadow-2xl" />
         </div>
       )}
 
@@ -497,6 +784,7 @@ const App: React.FC = () => {
                     { label: '质感密度', val: enhanceParams.texture, key: 'texture' },
                     { label: '细节补充', val: enhanceParams.detail, key: 'detail' },
                     { label: '光感增强', val: enhanceParams.light, key: 'light' },
+                    { label: '景深控制', val: enhanceParams.depth, key: 'depth' },
                   ].map((p) => (
                     <div key={p.key} className="space-y-2">
                       <div className="flex justify-between text-[10px] font-black uppercase opacity-60">
@@ -563,26 +851,58 @@ const App: React.FC = () => {
                   <span className="text-[9px] font-black uppercase tracking-[1em] text-white/30">AI Processing...</span>
                 </div>
               ) : resultImage ? (
-                <div className="group relative w-full h-full flex items-center justify-center p-12">
-                  <img
-                    src={resultImage}
-                    className="max-w-full max-h-full object-contain rounded-[3rem] shadow-2xl animate-in zoom-in-95 duration-700"
-                  />
-                  <button
-                    onClick={() => {
-                      const link = document.createElement('a');
-                      link.href = resultImage;
-                      link.download = 'result.png';
-                      link.click();
-                    }}
-                    className="absolute inset-0 m-auto w-fit h-fit px-10 py-5 bg-white text-black text-[10px] font-black uppercase tracking-widest rounded-full opacity-0 group-hover:opacity-100 transition-all transform translate-y-4 group-hover:translate-y-0 shadow-2xl pointer-events-auto"
+                <div className="group relative w-full h-full flex items-center justify-center p-8 pb-28">
+                  <div
+                    className="w-full max-w-[72%] max-h-[72%] rounded-[2.5rem] overflow-hidden border border-white/10 bg-black/40"
+                    style={{ aspectRatio: parseAspectRatioToCss(lineartAspectRatio) }}
                   >
-                    Download Result
-                  </button>
+                    <img
+                      src={resultImage}
+                      className="w-full h-full object-contain animate-in zoom-in-95 duration-700"
+                    />
+                  </div>
+                  <div className="absolute top-10 right-10 flex gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => setPreviewImage(resultImage)}
+                      className="px-6 py-3 bg-white text-black text-[10px] font-black uppercase tracking-widest rounded-full shadow-xl"
+                    >
+                      查看大图
+                    </button>
+                    <button
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = resultImage;
+                        link.download = 'result.png';
+                        link.click();
+                      }}
+                      className="px-6 py-3 bg-white/10 border border-white/20 text-white text-[10px] font-black uppercase tracking-widest rounded-full"
+                    >
+                      下载
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <span className="text-[25rem] font-black italic opacity-[0.02] select-none">V8</span>
               )}
+            </div>
+
+            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[86%] max-w-5xl rounded-2xl border border-white/10 bg-black/55 backdrop-blur-md px-3 py-2">
+              <div className="flex items-center gap-2 overflow-x-auto">
+                {historyItems[renderMode].length === 0 ? (
+                  <span className="text-[10px] text-white/30 px-3 py-2 uppercase tracking-widest">暂无历史回放</span>
+                ) : (
+                  historyItems[renderMode].map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => setResultImage(item.image)}
+                      className="shrink-0 w-20 h-14 rounded-lg overflow-hidden border border-white/10 hover:border-emerald-400/60 transition"
+                      title="点击回放"
+                    >
+                      <img src={item.image} className="w-full h-full object-cover" />
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
           </main>
         </div>
