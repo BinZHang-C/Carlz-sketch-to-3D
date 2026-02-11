@@ -23,25 +23,38 @@ interface HistoryItem {
   mode: RenderMode;
 }
 
-const buildPlanProtocolPrompt = (blendWeight: number): string => {
-  const styleCapture = Math.min(98, Math.max(70, Math.round(blendWeight * 0.9 + 8)));
+interface StyleFingerprint {
+  avgHex: string;
+  hue: number;
+  saturation: number;
+  lightness: number;
+  contrast: number;
+  warmRatio: number;
+}
+
+const buildPlanProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerprint | null): string => {
+  const styleCapture = Math.min(99, Math.max(75, Math.round(blendWeight * 0.92 + 7)));
+  const styleTelemetry = fingerprint
+    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%.`
+    : 'Reference telemetry unavailable: still prioritize strict colorimetry lock to Image 2.';
 
   return [
-    '[PROTOCOL: PLAN_STYLE_LOCK_V2]',
+    '[PROTOCOL: PLAN_STYLE_LOCK_V3]',
     'Task: Convert Image 1 architectural lineart/floor plan into a 3D rendered visualization while preserving exact geometry from Image 1.',
     'Instruction priority (strict order):',
-    '1) Geometry lock from Image 1. 2) Style lock from Image 2. 3) Quality enhancement.',
+    '1) Pixel geometry lock from Image 1. 2) Colorimetry lock from Image 2. 3) Detail enhancement.',
     'Hard geometry constraints:',
     '- Pixel-level geometry lock: keep every wall edge, opening boundary, corner position, and spatial proportion aligned to Image 1 without translation, warping, redesign, or camera-angle drift.',
     '- Keep architectural contour readability and line hierarchy intact. No added structures, no removed structures, no layout hallucination.',
     'Hard style constraints from Image 2 only:',
-    '- Use Image 2 as the sole style authority. Do not borrow style cues from prior outputs or implicit memory.',
-    '- Match dominant palette, hue distribution, color gamut boundary, tonal contrast curve, shadow softness, light direction, and saturation envelope.',
-    '- Keep warm/cool balance and atmosphere density consistent with Image 2. Avoid random color temperature drift between runs.',
+    '- Use Image 2 as the sole style authority. Never borrow style cues from previous outputs, history thumbnails, or latent memory.',
+    '- Match dominant palette family, hue distribution, color gamut boundary, tonal contrast curve, shadow softness, light direction, saturation envelope, and warm/cool balance.',
+    '- Keep atmosphere density and brightness interval consistent with Image 2. Avoid random color temperature drift.',
+    styleTelemetry,
     `- Style adherence target: ${styleCapture}% (derived from blend weight ${blendWeight}%).`,
-    'Stability requirement for repeated generation with the same inputs:',
-    '- Low-variance rendering: repeated runs must maintain nearly identical palette family, gamut range, hue bias, and light-shadow logic.',
-    '- If uncertainty exists, prefer conservative reproduction of Image 2 colorimetry rather than introducing new tones.',
+    'Stability requirement for repeated runs with identical inputs:',
+    '- Low-variance rendering: outputs must remain within a tight tolerance around Image 2 hue/gamut/saturation/light-direction signature.',
+    '- If uncertain, prefer conservative reproduction of Image 2 colorimetry; do not invent new tones or cinematic grading.',
     'Rendering guidance:',
     '- Maintain clean architectural visualization quality with stable surfaces and minimal texture noise artifacts.',
   ].join(' ');
@@ -62,6 +75,112 @@ const parseAspectRatioToCss = (ratio: string): string => {
   if (ratio === '3:4') return '3 / 4';
   return '1 / 1';
 };
+
+
+const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+
+const rgbToHsl = (r: number, g: number, b: number) => {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const delta = max - min;
+
+  let h = 0;
+  if (delta !== 0) {
+    if (max === rn) h = ((gn - bn) / delta) % 6;
+    else if (max === gn) h = (bn - rn) / delta + 2;
+    else h = (rn - gn) / delta + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+
+  const l = (max + min) / 2;
+  const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1));
+
+  return { h, s: clamp01(s), l: clamp01(l) };
+};
+
+const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const maxSide = 192;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) throw new Error('无法分析参考图风格，请重试。');
+
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        let total = 0;
+        let sumR = 0;
+        let sumG = 0;
+        let sumB = 0;
+        let sumSat = 0;
+        let sumLight = 0;
+        let sumHueX = 0;
+        let sumHueY = 0;
+        let warmCount = 0;
+        let minLum = 1;
+        let maxLum = 0;
+
+        for (let i = 0; i < data.length; i += 4) {
+          const alpha = data[i + 3] / 255;
+          if (alpha < 0.05) continue;
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const { h, s, l } = rgbToHsl(r, g, b);
+          const hRad = (h * Math.PI) / 180;
+
+          total += 1;
+          sumR += r;
+          sumG += g;
+          sumB += b;
+          sumSat += s;
+          sumLight += l;
+          sumHueX += Math.cos(hRad);
+          sumHueY += Math.sin(hRad);
+          if (r > b) warmCount += 1;
+          minLum = Math.min(minLum, l);
+          maxLum = Math.max(maxLum, l);
+        }
+
+        if (!total) throw new Error('参考图像像素无效，请更换图片。');
+
+        const avgR = Math.round(sumR / total);
+        const avgG = Math.round(sumG / total);
+        const avgB = Math.round(sumB / total);
+        const avgHue = (Math.atan2(sumHueY / total, sumHueX / total) * 180) / Math.PI;
+        const normalizedHue = Math.round(avgHue < 0 ? avgHue + 360 : avgHue);
+        const avgSat = Math.round((sumSat / total) * 100);
+        const avgLight = Math.round((sumLight / total) * 100);
+        const contrast = Math.round((maxLum - minLum) * 100);
+        const warmRatio = Math.round((warmCount / total) * 100);
+        const avgHex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
+
+        resolve({
+          avgHex: avgHex.toUpperCase(),
+          hue: normalizedHue,
+          saturation: avgSat,
+          lightness: avgLight,
+          contrast,
+          warmRatio,
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error('参考图风格分析失败。'));
+      }
+    };
+    img.onerror = () => reject(new Error('参考图加载失败，请重试。'));
+    img.src = dataUrl;
+  });
 
 const MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024;
 const API_KEY_STORAGE_KEY = 'ARCHI_LOGIC_KEY';
@@ -120,6 +239,7 @@ const App: React.FC = () => {
   const [blendWeight, setBlendWeight] = useState<number>(100);
   const [lineartAspectRatio, setLineartAspectRatio] = useState<string>('1:1');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [refStyleFingerprint, setRefStyleFingerprint] = useState<StyleFingerprint | null>(null);
 
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [tempApiKey, setTempApiKey] = useState('');
@@ -165,6 +285,7 @@ const App: React.FC = () => {
     setEnhanceParams(defaultEnhanceParams);
     setStatus('idle');
     setErrorMessage(null);
+    setRefStyleFingerprint(null);
   };
 
   const getImageAspectRatio = (base64: string): Promise<string> => {
@@ -219,6 +340,8 @@ const App: React.FC = () => {
         setErrorMessage(null);
         if (type === 'ref') {
           setRefImage(data);
+          const fingerprint = await analyzeReferenceStyle(data);
+          setRefStyleFingerprint(fingerprint);
         } else {
           setLineartImage(data);
           const ratio = await getImageAspectRatio(data);
@@ -272,7 +395,7 @@ const App: React.FC = () => {
 
         if (renderMode === 'plan') {
           parts.push({
-            text: `${buildPlanProtocolPrompt(blendWeight)} Interpret the above priorities literally and strictly for deterministic style consistency.`,
+            text: `${buildPlanProtocolPrompt(blendWeight, refStyleFingerprint)} Interpret the above priorities literally and strictly for deterministic style consistency.`,
           });
         } else {
           parts.push({
