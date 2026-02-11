@@ -17,6 +17,26 @@ interface ParsedDataUrl {
   data: string;
 }
 
+const buildPlanProtocolPrompt = (blendWeight: number): string => {
+  const styleCapture = Math.min(95, Math.max(55, Math.round(blendWeight * 0.85 + 10)));
+
+  return [
+    '[PROTOCOL: PLAN_STYLE_LOCK]',
+    'Task: Convert Image 1 architectural lineart/floor plan into a 3D rendered visualization while preserving exact geometry from Image 1.',
+    'Hard constraints (highest priority):',
+    '- Pixel-level geometry lock: keep every wall edge, opening boundary, corner position, and spatial proportion aligned to Image 1 without translation, warping, or redesign.',
+    '- Do not hallucinate new structures, furniture, facade changes, or camera-angle drift.',
+    '- Keep architectural contour readability and line hierarchy intact.',
+    'Style extraction from Image 2 (second priority):',
+    '- Match dominant palette, hue distribution, color gamut, contrast curve, shadow softness, lighting direction, and saturation behavior.',
+    `- Style adherence target: ${styleCapture}% (weight from user blend ${blendWeight}%).`,
+    '- Preserve material mood and atmosphere from Image 2, but never at the expense of geometric lock.',
+    'Rendering guidance:',
+    '- Use physically coherent lighting and shadows consistent with Image 2 mood.',
+    '- Maintain clean architectural visualization quality with stable surfaces and no texture noise artifacts.',
+  ].join(' ');
+};
+
 const MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024;
 const API_KEY_STORAGE_KEY = 'ARCHI_LOGIC_KEY';
 const API_KEY_MIN_LENGTH = 10;
@@ -217,9 +237,13 @@ const App: React.FC = () => {
       } else {
         const refPart = parseDataUrl(refImage!);
         parts.push({ inlineData: { data: refPart.data, mimeType: refPart.mimeType } });
-        parts.push({
-          text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
-        });
+        parts.push(
+          renderMode === 'plan'
+            ? { text: buildPlanProtocolPrompt(blendWeight) }
+            : {
+                text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
+              },
+        );
       }
 
       const response: GenerateContentResponse = await ai.models.generateContent({
