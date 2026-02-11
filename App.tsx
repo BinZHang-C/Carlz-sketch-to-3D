@@ -24,22 +24,26 @@ interface HistoryItem {
 }
 
 const buildPlanProtocolPrompt = (blendWeight: number): string => {
-  const styleCapture = Math.min(95, Math.max(55, Math.round(blendWeight * 0.85 + 10)));
+  const styleCapture = Math.min(98, Math.max(70, Math.round(blendWeight * 0.9 + 8)));
 
   return [
-    '[PROTOCOL: PLAN_STYLE_LOCK]',
+    '[PROTOCOL: PLAN_STYLE_LOCK_V2]',
     'Task: Convert Image 1 architectural lineart/floor plan into a 3D rendered visualization while preserving exact geometry from Image 1.',
-    'Hard constraints (highest priority):',
-    '- Pixel-level geometry lock: keep every wall edge, opening boundary, corner position, and spatial proportion aligned to Image 1 without translation, warping, or redesign.',
-    '- Do not hallucinate new structures, furniture, facade changes, or camera-angle drift.',
-    '- Keep architectural contour readability and line hierarchy intact.',
-    'Style extraction from Image 2 (second priority):',
-    '- Match dominant palette, hue distribution, color gamut, contrast curve, shadow softness, lighting direction, and saturation behavior.',
-    `- Style adherence target: ${styleCapture}% (weight from user blend ${blendWeight}%).`,
-    '- Preserve material mood and atmosphere from Image 2, but never at the expense of geometric lock.',
+    'Instruction priority (strict order):',
+    '1) Geometry lock from Image 1. 2) Style lock from Image 2. 3) Quality enhancement.',
+    'Hard geometry constraints:',
+    '- Pixel-level geometry lock: keep every wall edge, opening boundary, corner position, and spatial proportion aligned to Image 1 without translation, warping, redesign, or camera-angle drift.',
+    '- Keep architectural contour readability and line hierarchy intact. No added structures, no removed structures, no layout hallucination.',
+    'Hard style constraints from Image 2 only:',
+    '- Use Image 2 as the sole style authority. Do not borrow style cues from prior outputs or implicit memory.',
+    '- Match dominant palette, hue distribution, color gamut boundary, tonal contrast curve, shadow softness, light direction, and saturation envelope.',
+    '- Keep warm/cool balance and atmosphere density consistent with Image 2. Avoid random color temperature drift between runs.',
+    `- Style adherence target: ${styleCapture}% (derived from blend weight ${blendWeight}%).`,
+    'Stability requirement for repeated generation with the same inputs:',
+    '- Low-variance rendering: repeated runs must maintain nearly identical palette family, gamut range, hue bias, and light-shadow logic.',
+    '- If uncertainty exists, prefer conservative reproduction of Image 2 colorimetry rather than introducing new tones.',
     'Rendering guidance:',
-    '- Use physically coherent lighting and shadows consistent with Image 2 mood.',
-    '- Maintain clean architectural visualization quality with stable surfaces and no texture noise artifacts.',
+    '- Maintain clean architectural visualization quality with stable surfaces and minimal texture noise artifacts.',
   ].join(' ');
 };
 
@@ -267,15 +271,9 @@ const App: React.FC = () => {
         parts.push({ inlineData: { data: refPart.data, mimeType: refPart.mimeType } });
 
         if (renderMode === 'plan') {
-          const latestPlanHistory = historyItems.plan[0];
-          if (latestPlanHistory) {
-            const previousPart = parseDataUrl(latestPlanHistory.image);
-            parts.push({ inlineData: { data: previousPart.data, mimeType: previousPart.mimeType } });
-            parts.push({
-              text: '[CONSISTENCY_ANCHOR] Image 3 is the previous accepted PLAN result. Keep color gamut, hue balance, tonal contrast, saturation envelope, and light-shadow direction consistent with Image 2 and Image 3 while preserving Image 1 geometry lock.',
-            });
-          }
-          parts.push({ text: `${buildPlanProtocolPrompt(blendWeight)} Enforce low-variance style output across repeated runs using the same reference.` });
+          parts.push({
+            text: `${buildPlanProtocolPrompt(blendWeight)} Interpret the above priorities literally and strictly for deterministic style consistency.`,
+          });
         } else {
           parts.push({
             text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
