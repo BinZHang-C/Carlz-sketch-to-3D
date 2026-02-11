@@ -1,0 +1,7 @@
+{
+  "name": "CAD Plan Colorizer AI",
+  "description": "An advanced AI-powered tool for architects and interior designers to transform CAD line drawings into professional color floor plans with elegant lighting and texture mapping.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
