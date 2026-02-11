@@ -30,12 +30,15 @@ interface StyleFingerprint {
   lightness: number;
   contrast: number;
   warmRatio: number;
+  highlightRatio: number;
+  shadowRatio: number;
+  lightDirectionDeg: number;
 }
 
 const buildPlanProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerprint | null): string => {
   const styleCapture = Math.min(99, Math.max(75, Math.round(blendWeight * 0.92 + 7)));
   const styleTelemetry = fingerprint
-    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%.`
+    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%, highlight ratio: ${fingerprint.highlightRatio}%, shadow ratio: ${fingerprint.shadowRatio}%, light direction: ${fingerprint.lightDirectionDeg}°.`
     : 'Reference telemetry unavailable: still prioritize strict colorimetry lock to Image 2.';
 
   return [
@@ -54,12 +57,31 @@ const buildPlanProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerpr
     `- Style adherence target: ${styleCapture}% (derived from blend weight ${blendWeight}%).`,
     'Stability requirement for repeated runs with identical inputs:',
     '- Low-variance rendering: outputs must remain within a tight tolerance around Image 2 hue/gamut/saturation/light-direction signature.',
+    '- Error budget target: keep hue/saturation/lightness/contrast drift within ±1% versus Image 2 telemetry whenever feasible.',
     '- If uncertain, prefer conservative reproduction of Image 2 colorimetry; do not invent new tones or cinematic grading.',
     'Rendering guidance:',
     '- Maintain clean architectural visualization quality with stable surfaces and minimal texture noise artifacts.',
   ].join(' ');
 };
 
+const buildSpatialProtocolPrompt = (blendWeight: number, fingerprint: StyleFingerprint | null): string => {
+  const styleCapture = Math.min(98, Math.max(68, Math.round(blendWeight * 0.88 + 10)));
+  const spatialTelemetry = fingerprint
+    ? `Reference telemetry -> avg color: ${fingerprint.avgHex}, hue: ${fingerprint.hue}°, saturation: ${fingerprint.saturation}%, lightness: ${fingerprint.lightness}%, contrast: ${fingerprint.contrast}%, warm ratio: ${fingerprint.warmRatio}%, highlight ratio: ${fingerprint.highlightRatio}%, shadow ratio: ${fingerprint.shadowRatio}%, light direction: ${fingerprint.lightDirectionDeg}°.`
+    : 'Reference telemetry unavailable: still follow strict lineart lock + material screenshot extraction from Image 2.';
+
+  return [
+    '[PROTOCOL: SPATIAL_LOCK_V2]',
+    'Task: Transfer Image 2 material language into Image 1 architecture while keeping Image 1 geometry structure pixel-locked.',
+    'Hard constraints:',
+    '- Pixel-level lineart lock: preserve every boundary, edge, opening, corner, and proportion from Image 1 without deformation or topology edits.',
+    '- Material screenshot recognition: detect materials in Image 2 (surface roughness, reflectance, texture scale, pattern frequency) and map them faithfully to corresponding architectural regions.',
+    '- Keep camera framing and global perspective stable and consistent with Image 1 structural layout.',
+    spatialTelemetry,
+    `- Style adherence target: ${styleCapture}% based on blend weight ${blendWeight}%.`,
+    '- Consistency tolerance target: keep hue/saturation/lightness/contrast drift within ±1% versus Image 2 telemetry whenever feasible.',
+  ].join(' ');
+};
 
 const defaultEnhanceParams: EnhanceParams = {
   texture: 99,
@@ -130,6 +152,14 @@ const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
         let warmCount = 0;
         let minLum = 1;
         let maxLum = 0;
+        let highlightCount = 0;
+        let shadowCount = 0;
+        let brightWeightSum = 0;
+        let darkWeightSum = 0;
+        let brightX = 0;
+        let brightY = 0;
+        let darkX = 0;
+        let darkY = 0;
 
         for (let i = 0; i < data.length; i += 4) {
           const alpha = data[i + 3] / 255;
@@ -139,6 +169,10 @@ const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
           const b = data[i + 2];
           const { h, s, l } = rgbToHsl(r, g, b);
           const hRad = (h * Math.PI) / 180;
+          const pixelIndex = i / 4;
+          const x = pixelIndex % canvas.width;
+          const y = Math.floor(pixelIndex / canvas.width);
+          const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 
           total += 1;
           sumR += r;
@@ -151,6 +185,20 @@ const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
           if (r > b) warmCount += 1;
           minLum = Math.min(minLum, l);
           maxLum = Math.max(maxLum, l);
+
+          if (luminance >= 0.68) {
+            highlightCount += 1;
+            brightWeightSum += luminance;
+            brightX += x * luminance;
+            brightY += y * luminance;
+          }
+          if (luminance <= 0.32) {
+            shadowCount += 1;
+            const darkWeight = 1 - luminance;
+            darkWeightSum += darkWeight;
+            darkX += x * darkWeight;
+            darkY += y * darkWeight;
+          }
         }
 
         if (!total) throw new Error('参考图像像素无效，请更换图片。');
@@ -164,6 +212,14 @@ const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
         const avgLight = Math.round((sumLight / total) * 100);
         const contrast = Math.round((maxLum - minLum) * 100);
         const warmRatio = Math.round((warmCount / total) * 100);
+        const highlightRatio = Math.round((highlightCount / total) * 100);
+        const shadowRatio = Math.round((shadowCount / total) * 100);
+        const brightCenterX = brightWeightSum > 0 ? brightX / brightWeightSum : canvas.width / 2;
+        const brightCenterY = brightWeightSum > 0 ? brightY / brightWeightSum : canvas.height / 2;
+        const darkCenterX = darkWeightSum > 0 ? darkX / darkWeightSum : canvas.width / 2;
+        const darkCenterY = darkWeightSum > 0 ? darkY / darkWeightSum : canvas.height / 2;
+        const directionRad = Math.atan2(brightCenterY - darkCenterY, brightCenterX - darkCenterX);
+        const lightDirectionDeg = Math.round((((directionRad * 180) / Math.PI) + 360) % 360);
         const avgHex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
 
         resolve({
@@ -173,6 +229,9 @@ const analyzeReferenceStyle = (dataUrl: string): Promise<StyleFingerprint> =>
           lightness: avgLight,
           contrast,
           warmRatio,
+          highlightRatio,
+          shadowRatio,
+          lightDirectionDeg,
         });
       } catch (error) {
         reject(error instanceof Error ? error : new Error('参考图风格分析失败。'));
@@ -399,7 +458,7 @@ const App: React.FC = () => {
           });
         } else {
           parts.push({
-            text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
+            text: buildSpatialProtocolPrompt(blendWeight, refStyleFingerprint),
           });
         }
       }
