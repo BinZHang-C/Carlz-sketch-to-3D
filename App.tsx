@@ -23,9 +23,8 @@ const App: React.FC = () => {
   const [blendWeight, setBlendWeight] = useState<number>(100);
   const [lineartAspectRatio, setLineartAspectRatio] = useState<string>("1:1");
   
-  // API 相关状态
-  const [showKeyModal, setShowKeyModal] = useState(false);
-  const [tempApiKey, setTempApiKey] = useState('');
+  // API 相关状态：优先从本地存储读取
+  const [showKeyInput, setShowKeyInput] = useState(false);
   const [manualApiKey, setManualApiKey] = useState(() => localStorage.getItem('ARCHI_LOGIC_KEY') || '');
   const [isEnvKeyActive, setIsEnvKeyActive] = useState(false);
 
@@ -40,10 +39,10 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lineartInputRef = useRef<HTMLInputElement>(null);
 
+  // 持续同步环境中的 Key 状态
   const checkApiStatus = async () => {
     const win = window as any;
     let envActive = false;
-    // Follow "API Key Selection" instructions for Veo/Imagen models
     if (win.aistudio && typeof win.aistudio.hasSelectedApiKey === 'function') {
       envActive = await win.aistudio.hasSelectedApiKey();
     } else if (process.env.API_KEY && process.env.API_KEY.length > 10) {
@@ -96,18 +95,14 @@ const App: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
+  // 关键：点击执行时才确定最终使用的 Key
   const executeSynthesis = async () => {
-    // Priority: Manual Key > Env Key
+    // 优先级：手动输入 > 自动注入
     const finalKey = manualApiKey.trim() || process.env.API_KEY || '';
     
     if (!finalKey || finalKey.length < 10) {
-      const win = window as any;
-      if (win.aistudio && typeof win.aistudio.openSelectKey === 'function') {
-        await win.aistudio.openSelectKey();
-        return;
-      }
-      setTempApiKey(manualApiKey);
-      setShowKeyModal(true);
+      alert("检测到 API Key 缺失，请先在控制台输入您的 Paid 密钥。");
+      setShowKeyInput(true);
       return;
     }
 
@@ -117,21 +112,20 @@ const App: React.FC = () => {
     setStatus('rendering');
     
     try {
-      // Create a new instance right before use to ensure updated key
+      // 核心：即时实例化 GoogleGenAI，确保拿到的是最新的 finalKey
       const ai = new GoogleGenAI({ apiKey: finalKey });
       const apiSize = selectedSize === "4K输出" ? "4K" : selectedSize === "2K输出" ? "2K" : "1K";
       const parts: any[] = [];
 
       if (isEnhance) {
         parts.push({ inlineData: { data: lineartImage.split(',')[1], mimeType: 'image/png' } });
-        parts.push({ text: `[PROTOCOL: HD_REMASTER] texture: ${enhanceParams.texture}%, detail: ${enhanceParams.detail}%, light: ${enhanceParams.light}%. Enhance quality while preserving architecture lines.` });
+        parts.push({ text: `[PROTOCOL: HD_REMASTER] Target texture density: ${enhanceParams.texture}%, Detail restoration: ${enhanceParams.detail}%, Global illumination: ${enhanceParams.light}%. Strictly preserve geometry.` });
       } else {
         parts.push({ inlineData: { data: lineartImage.split(',')[1], mimeType: 'image/png' } });
         parts.push({ inlineData: { data: refImage!.split(',')[1], mimeType: 'image/jpeg' } });
-        parts.push({ text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.` });
+        parts.push({ text: `[PROTOCOL: SPATIAL_SYNTHESIS] Transfer material properties and lighting from Image 2 to CAD lines in Image 1. Blend weight: ${blendWeight}%. Photorealistic architecture output.` });
       }
 
-      // Use generateContent for gemini-3-pro-image-preview
       const response: GenerateContentResponse = await ai.models.generateContent({
         model: 'gemini-3-pro-image-preview',
         contents: { parts: parts },
@@ -143,98 +137,35 @@ const App: React.FC = () => {
         }
       });
 
-      // Find the image part in response candidates
       const imgPart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
       if (imgPart?.inlineData) {
         setResultImage(`data:image/png;base64,${imgPart.inlineData.data}`);
+      } else {
+        throw new Error("Model returned no image data.");
       }
     } catch (err: any) {
-      console.error(err);
-      if (err.message?.includes("Requested entity was not found") || err.message?.includes("billing") || err.message?.includes("403")) {
-        const win = window as any;
-        if (win.aistudio && typeof win.aistudio.openSelectKey === 'function') {
-          await win.aistudio.openSelectKey();
-        } else {
-          alert("Key error: Please ensure your API key has billing enabled.");
-          setShowKeyModal(true);
-        }
+      console.error("Rendering failed:", err);
+      if (err.message?.includes("billing") || err.message?.includes("not found") || err.message?.includes("403")) {
+        alert("计费或权限错误：请确保您的 API Key 属于一个【已关联付费结算账户】的项目。免费 Key 无法生成 1K 以上图像。");
+        setShowKeyInput(true);
       } else {
-        alert("Error: " + (err.message || "Unknown error"));
+        alert("执行失败: " + (err.message || "未知错误"));
       }
     } finally {
       setStatus('idle');
     }
   };
 
-  const confirmSaveKey = () => {
-    const trimmed = tempApiKey.trim();
+  const saveManualKey = (val: string) => {
+    const trimmed = val.trim();
     setManualApiKey(trimmed);
     localStorage.setItem('ARCHI_LOGIC_KEY', trimmed);
-    setShowKeyModal(false);
-  };
-
-  // Fixed the missing saveManualKey function which caused the error
-  const clearManualKey = () => {
-    setTempApiKey('');
-    setManualApiKey('');
-    localStorage.removeItem('ARCHI_LOGIC_KEY');
-    setShowKeyModal(false);
   };
 
   return (
     <div className="h-screen bg-black text-[#666] flex overflow-hidden font-sans select-none relative">
       
-      {/* API Key Modal */}
-      {showKeyModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-300">
-          <div className="w-[480px] bg-[#0A0A0A] border border-white/10 p-10 rounded-[3rem] shadow-[0_0_100px_rgba(0,0,0,0.5)] space-y-8 relative">
-            <button onClick={() => setShowKeyModal(false)} className="absolute top-8 right-8 text-white/20 hover:text-white">
-              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-            
-            <div className="space-y-2">
-              <h3 className="text-white text-xl font-black uppercase tracking-tighter italic">API 配置管理</h3>
-              <p className="text-[10px] text-white/40 uppercase tracking-widest leading-relaxed">
-                请输入您的 Gemini API Key。高级图像合成仅支持已开启结算账户 (Billing) 的付费项目密钥。
-                <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="text-amber-500 ml-1 underline">结算文档</a>
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              <input 
-                type="password" 
-                autoFocus
-                value={tempApiKey}
-                onChange={(e) => setTempApiKey(e.target.value)}
-                placeholder="粘贴您的 API Key"
-                className="w-full bg-black border border-white/10 rounded-2xl px-6 py-4 text-sm text-white focus:border-amber-500 outline-none transition-all shadow-inner"
-              />
-              <div className="flex gap-4">
-                <button 
-                  onClick={confirmSaveKey}
-                  className="flex-1 py-4 bg-white text-black text-[11px] font-black uppercase tracking-widest rounded-2xl hover:bg-amber-500 hover:text-white transition-all active:scale-95"
-                >
-                  确认并保存
-                </button>
-                <button 
-                  onClick={clearManualKey}
-                  className="px-6 py-4 bg-white/5 text-rose-500 text-[11px] font-black uppercase tracking-widest rounded-2xl border border-white/10 hover:bg-rose-500/10 transition-all"
-                >
-                  清除
-                </button>
-              </div>
-            </div>
-            
-            <div className="p-4 bg-white/[0.02] rounded-xl border border-white/5">
-              <p className="text-[9px] text-white/30 italic uppercase leading-normal">
-                提示：若您在 AI Studio 内部使用且环境已注入 Key，则无需在此手动设置。手动设置的 Key 优先级更高且会存储在您的浏览器中。
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Side Navigation */}
+      {/* 侧边导航 */}
       <nav className="w-24 border-r border-white/10 flex flex-col items-center py-10 bg-[#050505] z-50">
         <div className="w-14 h-14 bg-white/5 rounded-3xl flex items-center justify-center mb-16 border border-white/10 group cursor-pointer" onClick={() => window.location.reload()}>
           <div className={`w-7 h-7 rounded-sm rotate-45 transition-all duration-700 ${isEnhance ? 'bg-amber-500 shadow-[0_0_20px_#f59e0b]' : 'bg-emerald-500 shadow-[0_0_20px_#10b981]'}`} />
@@ -254,7 +185,7 @@ const App: React.FC = () => {
       </nav>
 
       <div className="flex-1 flex flex-col">
-        {/* Top Header */}
+        {/* 顶部栏 */}
         <header className="h-20 flex items-center justify-between px-10 border-b border-white/10 bg-[#020202] shadow-xl relative z-10">
            <div className="flex items-center gap-4">
              {(["1K输出", "2K输出", "4K输出"] as ImageSize[]).map(size => (
@@ -264,24 +195,41 @@ const App: React.FC = () => {
            
            <div className="flex items-center gap-8">
              <div className="flex flex-col items-end">
-               <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${manualApiKey || isEnvKeyActive ? 'text-emerald-500 bg-emerald-500/10' : 'text-rose-500 bg-rose-500/10'}`}>
-                 {manualApiKey ? 'API: 自定义(就绪)' : isEnvKeyActive ? 'API: 环境注入(就绪)' : 'API: 未绑定'}
+               <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${isEnvKeyActive || manualApiKey ? 'text-emerald-500 bg-emerald-500/10' : 'text-rose-500 bg-rose-500/10'}`}>
+                 {manualApiKey ? 'API: 自定义(已保存)' : isEnvKeyActive ? 'API: 环境注入(就绪)' : 'API: 未连接'}
                </span>
                <span className="text-[10px] text-white/20 mt-1 uppercase italic">Aspect: {lineartAspectRatio}</span>
              </div>
-             <button onClick={() => { setTempApiKey(manualApiKey); setShowKeyModal(true); }} className={`p-3 rounded-xl border transition-all text-white active:scale-95 ${manualApiKey ? 'bg-amber-500/20 border-amber-500/40 text-amber-500' : 'bg-white/5 border-white/10 hover:bg-white/10'}`}>
+             <button onClick={() => setShowKeyInput(!showKeyInput)} className={`p-3 rounded-xl border transition-all text-white active:scale-95 ${showKeyInput ? 'bg-amber-500 border-amber-500' : 'bg-white/5 border-white/10 hover:bg-white/10'}`}>
                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
              </button>
            </div>
         </header>
 
         <div className="flex-1 flex">
-          {/* Controls */}
+          {/* 左侧控制台 */}
           <aside className="w-[400px] bg-[#030303] p-10 flex flex-col gap-10 border-r border-white/10 overflow-y-auto">
             <div className="space-y-2">
               <h2 className="text-white text-2xl font-black italic tracking-tighter uppercase">Archi-Logic V8</h2>
               <p className="text-[10px] font-black tracking-[0.3em] uppercase opacity-30">Topology Synthesis Alpha</p>
             </div>
+
+            {showKeyInput && (
+              <div className="p-6 bg-white/[0.03] border border-white/10 rounded-3xl space-y-4 animate-in fade-in slide-in-from-top-4">
+                <div className="flex justify-between items-center">
+                  <p className="text-[10px] font-black uppercase text-amber-500">手动设置 API KEY</p>
+                  <button onClick={() => saveManualKey('')} className="text-[8px] text-rose-500 uppercase font-bold hover:underline">清除</button>
+                </div>
+                <input 
+                  type="password" 
+                  value={manualApiKey}
+                  onChange={(e) => saveManualKey(e.target.value)}
+                  placeholder="在此输入 Gemini API Key"
+                  className="w-full bg-black border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-amber-500 outline-none transition-all"
+                />
+                <p className="text-[9px] opacity-40 leading-relaxed italic uppercase">提示：高级图像渲染需使用关联了 Billing 的付费账户密钥。</p>
+              </div>
+            )}
 
             <div className="space-y-10">
               {!isEnhance ? (
@@ -332,7 +280,7 @@ const App: React.FC = () => {
             </button>
           </aside>
 
-          {/* Viewport */}
+          {/* 右侧主视口 */}
           <main className="flex-1 bg-[#010101] p-16 flex items-center justify-center relative">
             <div className="w-full h-full rounded-[6rem] bg-[#020202] border border-white/10 flex items-center justify-center overflow-hidden relative shadow-2xl">
               {status === 'rendering' ? (
