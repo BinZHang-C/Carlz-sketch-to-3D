@@ -10,6 +10,7 @@ interface EnhanceParams {
   smoothing: number;
   detail: number;
   light: number;
+  depth: number;
 }
 
 interface ParsedDataUrl {
@@ -83,11 +84,37 @@ const buildSpatialProtocolPrompt = (blendWeight: number, fingerprint: StyleFinge
   ].join(' ');
 };
 
+
+const buildEnhanceProtocolPrompt = (params: EnhanceParams): string => {
+  const toEffectiveValue = (value: number) => Math.round(50 + (value - 50) * 0.2);
+  const textureControl = toEffectiveValue(params.texture);
+  const detailControl = toEffectiveValue(params.detail);
+  const lightControl = toEffectiveValue(params.light);
+  const depthControl = toEffectiveValue(params.depth);
+
+  return [
+    '[PROTOCOL: HD_REMASTER_8K_CINEMATIC]',
+    'Task: Upgrade Image 1 to ultra-clear 8K-grade architectural remaster while preserving original spatial content and structural details exactly.',
+    'Hard constraints:',
+    '- Do not alter layout, topology, camera framing, object positions, or architectural proportions.',
+    '- Remove blur and grain noise, but avoid plastic over-smoothing and avoid artificial sharpening halos.',
+    '- Keep all edges and micro-details faithful to the source, no hallucinated objects or texture drift.',
+    'Rendering quality goals:',
+    '- Deliver cinematic photoreal rendering with physically plausible material response.',
+    '- Improve texture readability, reflection behavior, highlight roll-off, and shadow transitions in a realistic non-exaggerated way.',
+    '- Enhance depth-of-field perception for cinematic layering while keeping key architectural planes readable.',
+    'User slider governance:',
+    '- Slider control weight = 20% for texture/detail/light/depth; preserve baseline realism as 80%.',
+    `- Effective controls -> texture: ${textureControl}%, detail: ${detailControl}%, light: ${lightControl}%, depth: ${depthControl}%.`,
+  ].join(' ');
+};
+
 const defaultEnhanceParams: EnhanceParams = {
   texture: 99,
   smoothing: 10,
   detail: 90,
   light: 70,
+  depth: 45,
 };
 
 const parseAspectRatioToCss = (ratio: string): string => {
@@ -446,7 +473,7 @@ const App: React.FC = () => {
 
       if (isEnhance) {
         parts.push({
-          text: `[PROTOCOL: HD_REMASTER] texture: ${enhanceParams.texture}%, detail: ${enhanceParams.detail}%, light: ${enhanceParams.light}%. Enhance quality while preserving architecture lines.`,
+          text: buildEnhanceProtocolPrompt(enhanceParams),
         });
       } else {
         const refPart = parseDataUrl(refImage!);
@@ -757,6 +784,7 @@ const App: React.FC = () => {
                     { label: '质感密度', val: enhanceParams.texture, key: 'texture' },
                     { label: '细节补充', val: enhanceParams.detail, key: 'detail' },
                     { label: '光感增强', val: enhanceParams.light, key: 'light' },
+                    { label: '景深控制', val: enhanceParams.depth, key: 'depth' },
                   ].map((p) => (
                     <div key={p.key} className="space-y-2">
                       <div className="flex justify-between text-[10px] font-black uppercase opacity-60">
