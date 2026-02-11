@@ -1,0 +1,8 @@
+/* Base stylesheet kept intentionally minimal to avoid missing asset warnings in production builds. */
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
