@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { extractInlineImageData, resolveApiKey } from "./utils";
 
 type RenderMode = 'plan' | 'spatial' | 'enhance';
 type Status = 'idle' | 'rendering';
@@ -46,7 +47,7 @@ const App: React.FC = () => {
     // Follow "API Key Selection" instructions for Veo/Imagen models
     if (win.aistudio && typeof win.aistudio.hasSelectedApiKey === 'function') {
       envActive = await win.aistudio.hasSelectedApiKey();
-    } else if (process.env.API_KEY && process.env.API_KEY.length > 10) {
+    } else if (resolveApiKey('', import.meta.env.VITE_GEMINI_API_KEY).length > 10) {
       envActive = true;
     }
     setIsEnvKeyActive(envActive);
@@ -98,7 +99,7 @@ const App: React.FC = () => {
 
   const executeSynthesis = async () => {
     // Priority: Manual Key > Env Key
-    const finalKey = manualApiKey.trim() || process.env.API_KEY || '';
+    const finalKey = resolveApiKey(manualApiKey, import.meta.env.VITE_GEMINI_API_KEY);
     
     if (!finalKey || finalKey.length < 10) {
       const win = window as any;
@@ -122,12 +123,15 @@ const App: React.FC = () => {
       const apiSize = selectedSize === "4K输出" ? "4K" : selectedSize === "2K输出" ? "2K" : "1K";
       const parts: any[] = [];
 
+      const lineartInlineData = extractInlineImageData(lineartImage, 'image/png');
+
       if (isEnhance) {
-        parts.push({ inlineData: { data: lineartImage.split(',')[1], mimeType: 'image/png' } });
+        parts.push({ inlineData: lineartInlineData });
         parts.push({ text: `[PROTOCOL: HD_REMASTER] texture: ${enhanceParams.texture}%, detail: ${enhanceParams.detail}%, light: ${enhanceParams.light}%. Enhance quality while preserving architecture lines.` });
       } else {
-        parts.push({ inlineData: { data: lineartImage.split(',')[1], mimeType: 'image/png' } });
-        parts.push({ inlineData: { data: refImage!.split(',')[1], mimeType: 'image/jpeg' } });
+        const refInlineData = extractInlineImageData(refImage!, 'image/jpeg');
+        parts.push({ inlineData: lineartInlineData });
+        parts.push({ inlineData: refInlineData });
         parts.push({ text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.` });
       }
 
@@ -173,7 +177,7 @@ const App: React.FC = () => {
     setShowKeyModal(false);
   };
 
-  // Fixed the missing saveManualKey function which caused the error
+  // Clear the manually saved API key from both state and localStorage
   const clearManualKey = () => {
     setTempApiKey('');
     setManualApiKey('');
