@@ -17,6 +17,12 @@ interface ParsedDataUrl {
   data: string;
 }
 
+interface HistoryItem {
+  id: number;
+  image: string;
+  mode: RenderMode;
+}
+
 const buildPlanProtocolPrompt = (blendWeight: number): string => {
   const styleCapture = Math.min(95, Math.max(55, Math.round(blendWeight * 0.85 + 10)));
 
@@ -35,6 +41,22 @@ const buildPlanProtocolPrompt = (blendWeight: number): string => {
     '- Use physically coherent lighting and shadows consistent with Image 2 mood.',
     '- Maintain clean architectural visualization quality with stable surfaces and no texture noise artifacts.',
   ].join(' ');
+};
+
+
+const defaultEnhanceParams: EnhanceParams = {
+  texture: 99,
+  smoothing: 10,
+  detail: 90,
+  light: 70,
+};
+
+const parseAspectRatioToCss = (ratio: string): string => {
+  if (ratio === '16:9') return '16 / 9';
+  if (ratio === '9:16') return '9 / 16';
+  if (ratio === '4:3') return '4 / 3';
+  if (ratio === '3:4') return '3 / 4';
+  return '1 / 1';
 };
 
 const MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024;
@@ -83,6 +105,12 @@ const App: React.FC = () => {
   const [refImage, setRefImage] = useState<string | null>(null);
   const [lineartImage, setLineartImage] = useState<string | null>(null);
   const [resultImage, setResultImage] = useState<string | null>(null);
+  const [historyItems, setHistoryItems] = useState<Record<RenderMode, HistoryItem[]>>({
+    plan: [],
+    spatial: [],
+    enhance: [],
+  });
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [selectedSize, setSelectedSize] = useState<ImageSize>('1K输出');
   const [blendWeight, setBlendWeight] = useState<number>(100);
@@ -94,12 +122,7 @@ const App: React.FC = () => {
   const [manualApiKey, setManualApiKey] = useState(() => getStoredApiKey());
   const [isEnvKeyActive, setIsEnvKeyActive] = useState(false);
 
-  const [enhanceParams, setEnhanceParams] = useState<EnhanceParams>({
-    texture: 99,
-    smoothing: 10,
-    detail: 90,
-    light: 70,
-  });
+  const [enhanceParams, setEnhanceParams] = useState<EnhanceParams>(defaultEnhanceParams);
 
   const isEnhance = renderMode === 'enhance';
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -130,7 +153,12 @@ const App: React.FC = () => {
 
   const handleModeSwitch = (mode: RenderMode) => {
     setRenderMode(mode);
+    setRefImage(null);
+    setLineartImage(null);
     setResultImage(null);
+    setBlendWeight(100);
+    setLineartAspectRatio('1:1');
+    setEnhanceParams(defaultEnhanceParams);
     setStatus('idle');
     setErrorMessage(null);
   };
@@ -237,13 +265,22 @@ const App: React.FC = () => {
       } else {
         const refPart = parseDataUrl(refImage!);
         parts.push({ inlineData: { data: refPart.data, mimeType: refPart.mimeType } });
-        parts.push(
-          renderMode === 'plan'
-            ? { text: buildPlanProtocolPrompt(blendWeight) }
-            : {
-                text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
-              },
-        );
+
+        if (renderMode === 'plan') {
+          const latestPlanHistory = historyItems.plan[0];
+          if (latestPlanHistory) {
+            const previousPart = parseDataUrl(latestPlanHistory.image);
+            parts.push({ inlineData: { data: previousPart.data, mimeType: previousPart.mimeType } });
+            parts.push({
+              text: '[CONSISTENCY_ANCHOR] Image 3 is the previous accepted PLAN result. Keep color gamut, hue balance, tonal contrast, saturation envelope, and light-shadow direction consistent with Image 2 and Image 3 while preserving Image 1 geometry lock.',
+            });
+          }
+          parts.push({ text: `${buildPlanProtocolPrompt(blendWeight)} Enforce low-variance style output across repeated runs using the same reference.` });
+        } else {
+          parts.push({
+            text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
+          });
+        }
       }
 
       const response: GenerateContentResponse = await ai.models.generateContent({
@@ -262,7 +299,12 @@ const App: React.FC = () => {
         throw new Error('模型未返回有效图像，请调整参数后重试。');
       }
 
-      setResultImage(`data:${imgPart.inlineData.mimeType || 'image/png'};base64,${imgPart.inlineData.data}`);
+      const newResult = `data:${imgPart.inlineData.mimeType || 'image/png'};base64,${imgPart.inlineData.data}`;
+      setResultImage(newResult);
+      setHistoryItems((prev) => ({
+        ...prev,
+        [renderMode]: [{ id: Date.now(), image: newResult, mode: renderMode }, ...prev[renderMode]].slice(0, 8),
+      }));
     } catch (err: unknown) {
       console.error(err);
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -363,6 +405,20 @@ const App: React.FC = () => {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {previewImage && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/85 backdrop-blur-sm p-8">
+          <button
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-8 right-8 text-white/80 hover:text-white"
+          >
+            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <img src={previewImage} className="max-w-[92vw] max-h-[90vh] object-contain rounded-3xl shadow-2xl" />
         </div>
       )}
 
@@ -587,26 +643,58 @@ const App: React.FC = () => {
                   <span className="text-[9px] font-black uppercase tracking-[1em] text-white/30">AI Processing...</span>
                 </div>
               ) : resultImage ? (
-                <div className="group relative w-full h-full flex items-center justify-center p-12">
-                  <img
-                    src={resultImage}
-                    className="max-w-full max-h-full object-contain rounded-[3rem] shadow-2xl animate-in zoom-in-95 duration-700"
-                  />
-                  <button
-                    onClick={() => {
-                      const link = document.createElement('a');
-                      link.href = resultImage;
-                      link.download = 'result.png';
-                      link.click();
-                    }}
-                    className="absolute inset-0 m-auto w-fit h-fit px-10 py-5 bg-white text-black text-[10px] font-black uppercase tracking-widest rounded-full opacity-0 group-hover:opacity-100 transition-all transform translate-y-4 group-hover:translate-y-0 shadow-2xl pointer-events-auto"
+                <div className="group relative w-full h-full flex items-center justify-center p-8 pb-28">
+                  <div
+                    className="w-full max-w-[72%] max-h-[72%] rounded-[2.5rem] overflow-hidden border border-white/10 bg-black/40"
+                    style={{ aspectRatio: parseAspectRatioToCss(lineartAspectRatio) }}
                   >
-                    Download Result
-                  </button>
+                    <img
+                      src={resultImage}
+                      className="w-full h-full object-contain animate-in zoom-in-95 duration-700"
+                    />
+                  </div>
+                  <div className="absolute top-10 right-10 flex gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => setPreviewImage(resultImage)}
+                      className="px-6 py-3 bg-white text-black text-[10px] font-black uppercase tracking-widest rounded-full shadow-xl"
+                    >
+                      查看大图
+                    </button>
+                    <button
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = resultImage;
+                        link.download = 'result.png';
+                        link.click();
+                      }}
+                      className="px-6 py-3 bg-white/10 border border-white/20 text-white text-[10px] font-black uppercase tracking-widest rounded-full"
+                    >
+                      下载
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <span className="text-[25rem] font-black italic opacity-[0.02] select-none">V8</span>
               )}
+            </div>
+
+            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-[86%] max-w-5xl rounded-2xl border border-white/10 bg-black/55 backdrop-blur-md px-3 py-2">
+              <div className="flex items-center gap-2 overflow-x-auto">
+                {historyItems[renderMode].length === 0 ? (
+                  <span className="text-[10px] text-white/30 px-3 py-2 uppercase tracking-widest">暂无历史回放</span>
+                ) : (
+                  historyItems[renderMode].map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => setResultImage(item.image)}
+                      className="shrink-0 w-20 h-14 rounded-lg overflow-hidden border border-white/10 hover:border-emerald-400/60 transition"
+                      title="点击回放"
+                    >
+                      <img src={item.image} className="w-full h-full object-cover" />
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
           </main>
         </div>
