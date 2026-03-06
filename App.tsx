@@ -85,6 +85,28 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lineartInputRef = useRef<HTMLInputElement>(null);
 
+  const buildSynthesisProtocol = (weight: number, mode: RenderMode): string => {
+    if (mode === 'plan') {
+      return [
+        '[PROTOCOL: PLAN_DNA_LOCK]',
+        'Image 1 = floor plan / CAD geometry anchor. Keep walls, rooms, circulation and scale unchanged.',
+        'Image 2 = reference DNA source. First parse its color palette, white balance, lighting contrast and material cues.',
+        `Apply parsed DNA to Image 1 with strict consistency lock at ${weight}% influence.`,
+        'If Image 2 is low-saturation / grayscale, keep output low-saturation and neutral. DO NOT introduce warm sepia cast.',
+        'Preserve reference lighting logic (brightness distribution and shadow softness) without cinematic recolor.',
+        'Preserve a clean top-down architectural expression. No extra style filters, no random texture hallucination.',
+        'Output must look like the same design language as Image 2, mapped onto Image 1 geometry only.',
+      ].join(' ');
+    }
+
+    return [
+      '[PROTOCOL: SPATIAL_SYNTHESIS]',
+      'Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1.',
+      `Blend weight: ${weight}%.`,
+      'Preserve geometry and avoid global color cast shifts that are not present in Image 2.',
+    ].join(' ');
+  };
+
   const checkApiStatus = useCallback(async () => {
     const win = window as any;
     let envActive = false;
@@ -217,9 +239,7 @@ const App: React.FC = () => {
       } else {
         const refPart = parseDataUrl(refImage!);
         parts.push({ inlineData: { data: refPart.data, mimeType: refPart.mimeType } });
-        parts.push({
-          text: `[PROTOCOL: SPATIAL_SYNTHESIS] Apply style/materials from Image 2 to the floor plan/CAD structure in Image 1. Blend weight: ${blendWeight}%.`,
-        });
+        parts.push({ text: buildSynthesisProtocol(blendWeight, renderMode) });
       }
 
       const response: GenerateContentResponse = await ai.models.generateContent({
